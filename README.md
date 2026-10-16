@@ -14,39 +14,69 @@ Compatible natively with **Apple Home**, **Google Home**, **Home Assistant**, an
 
 ## Architecture Overview
 
-```mermaid
-flowchart TD
-    subgraph Ecosystems ["Smart Home Fabrics"]
-        AH["Apple Home"]
-        GH["Google Home"]
-        HA["Home Assistant"]
-    end
-
-    BLE["Bluetooth LE (Pairing / Commissioning)"] --> ESP
-    WIFI["2.4 GHz Wi-Fi 6 (Matter / IPv6)"] --> ESP
-
-    AH -.-> BLE
-    AH --> WIFI
-    GH --> WIFI
-    HA --> WIFI
-
-    subgraph Controller ["ESP32-C6 Controller"]
-        ESP["ESP32-C6 SoC"]
-        NVS["NVS Storage\n(custom_mac, Matter Fabrics)"]
-        LEDC["LEDC Hardware Timer\n(22 kHz, 11-bit)"]
-        BTN_TSK["Button Debounce Task\n(GPIO 9)"]
-        LED_TSK["Status LED Task\n(GPIO 8)"]
-
-        ESP --> NVS
-        ESP --> LEDC
-        ESP --> BTN_TSK
-        ESP --> LED_TSK
-    end
-
-    LEDC -->|GPIO 0 PWM| Q1["N-MOSFET (Cool White Strip)"]
-    LEDC -->|GPIO 1 PWM| Q2["N-MOSFET (Warm White Strip)"]
-    LED_TSK -->|GPIO 8| SLED["Status Indicator LED"]
-    BTN["Push Button (BOOT)"] -->|GPIO 9| BTN_TSK
+```text
+┌────────────────────────────────────────────────────────────────────┐
+│               Smart Home Fabrics (Matter Ecosystems)               │
+│  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐  │
+│  │    Apple Home    │  │   Google Home    │  │  Home Assistant  │  │
+│  │ (iOS / HomePod)  │  │(Android / Google)│  │ (Matter Native)  │  │
+│  └────────┬─────────┘  └────────┬─────────┘  └────────┬─────────┘  │
+└───────────┼─────────────────────┼─────────────────────┼────────────┘
+            │                     │                     │
+            │ BLE / Wi-Fi 6       │ Wi-Fi 6 (IPv6)      │ Wi-Fi 6 (IPv6)
+            ▼                     ▼                     ▼
+┌────────────────────────────────────────────────────────────────────┐
+│                 Wireless Transport & Commissioning                 │
+│  ┌───────────────────────────┐  ┌───────────────────────────────┐  │
+│  │ Bluetooth LE Commissioning│  │  2.4 GHz Wi-Fi 6 (Matter)     │  │
+│  │ - Fast BLE Advertising    │  │  - Thread-free Wi-Fi 6 Engine │  │
+│  │ - Secure Wi-Fi Provision  │  │  - Multi-Admin UDP / IPv6     │  │
+│  └─────────────┬─────────────┘  └───────────────┬───────────────┘  │
+└────────────────┼────────────────────────────────┼──────────────────┘
+                 │                                │
+                 │ BLE Provisioning Stream        │ Matter Cluster Commands
+                 ▼                                ▼
+┌────────────────────────────────────────────────────────────────────┐
+│                     ESP32-C6 Matter Controller                     │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │            ESP32-C6 SoC (ESP-Matter Core Engine)             │  │
+│  │  - Endpoint 1: Color Temperature Light (0x010C)              │  │
+│  │  - Clusters: OnOff (0x0006), Level (0x0008), Color (0x0300)  │  │
+│  │  - Non-Volatile Storage (NVS): custom_mac & Fabric State     │  │
+│  └──────┬───────────────────────┬──────────────────────┬────────┘  │
+│         │                       │                      │           │
+│         ▼                       ▼                      ▼           │
+│  ┌──────────────┐      ┌─────────────────┐    ┌─────────────────┐  │
+│  │ Status Task  │      │   Button Task   │    │  LEDC Hardware  │  │
+│  │   (GPIO 8)   │      │(GPIO 9 Debounce)│    │ (22kHz, 11-Bit) │  │
+│  └──────┬───────┘      └────────▲────────┘    └───────┬───┬─────┘  │
+└─────────┼───────────────────────┼─────────────────────┼───┼────────┘
+          │                       │                     │   │
+          │ GPIO 8 (Output)       │ GPIO 9 (Input)      │   │
+          ▼                       │                     │   │
+┌───────────────────┐    ┌────────┴────────┐            │   │
+│    Status LED     │    │   Push Button   │            │   │
+│  - Fast: Pairing  │    │   (BOOT / SW1)  │            │   │
+│  - Off: Paired    │    │ - Short: Toggle │            │   │
+│  - Pulse: Identify│    │ - 10s: Reset    │            │   │
+└───────────────────┘    └─────────────────┘            │   │
+                                                        │   │
+                ┌───────────────────────────────────────┘   │
+                │ GPIO 0 PWM (CW)           ┌───────────────┘
+                │                           │ GPIO 1 PWM (WW)
+                ▼                           ▼
+  ┌───────────────────────────┐       ┌───────────────────────────┐
+  │  N-MOSFET: Cool White CW  │       │  N-MOSFET: Warm White WW  │
+  │  - Logic-Level (IRLZ44N)  │       │  - Logic-Level (IRLZ44N)  │
+  │  - 100 Ω Gate / 10 kΩ PD  │       │  - 100 Ω Gate / 10 kΩ PD  │
+  └─────────────┬─────────────┘       └─────────────┬─────────────┘
+                │                                   │
+                │ Cool White PWM                    │ Warm White PWM
+                ▼                                   ▼
+┌────────────────────────────────────────────────────────────────────┐
+│       Dual-Channel Tunable White (CCT) LED Strip (12V / 24V)       │
+│      - Cool White (CW): 6500K            - Warm White (WW): 2700K  │
+└────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
