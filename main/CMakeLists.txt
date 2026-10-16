@@ -8,9 +8,11 @@ idf_component_register(
     PRIV_REQUIRES
         esp_matter
         driver
+        esp_driver_ledc
+        esp_driver_gpio
         esp_wifi
         esp_event
         nvs_flash
         esp_timer
-        esp_mac
+        esp_hw_support
 )

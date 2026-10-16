@@ -3,7 +3,7 @@
 #include <esp_matter.h>
 #include <esp_matter_ota.h>
 #include <nvs_flash.h>
-#include <app_reset.h>
+#include <setup_payload/OnboardingCodesUtil.h>
 
 #include "app_driver.h"
 #include "mac_config.h"
@@ -66,12 +66,12 @@ static esp_err_t app_identification_cb(identification::callback_type_t type,
 static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
 {
     switch (event->Type) {
-    case chip::DeviceEventType::kCommissioningComplete:
+    case chip::DeviceLayer::DeviceEventType::kCommissioningComplete:
         ESP_LOGI(TAG, "Commissioning complete!");
         app_driver_status_led_set_mode(STATUS_LED_MODE_OFF);
         break;
 
-    case chip::DeviceEventType::kFabricRemoved:
+    case chip::DeviceLayer::DeviceEventType::kFabricRemoved:
         ESP_LOGI(TAG, "Fabric removed");
         if (chip::Server::GetInstance().GetFabricTable().FabricCount() == 0) {
             // No fabrics remaining, revert to fast blink pairing mode
@@ -79,8 +79,8 @@ static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
         }
         break;
 
-    case chip::DeviceEventType::kBLEDeinitialized:
-        ESP_LOGI(TAG, "BLE deinitialized");
+    case chip::DeviceLayer::DeviceEventType::kCHIPoBLEAdvertisingChange:
+        ESP_LOGI(TAG, "BLE advertising state changed");
         break;
 
     default:
@@ -118,7 +118,7 @@ extern "C" void app_main()
     esp_err_t err = ESP_OK;
 
     ESP_LOGI(TAG, "===============================================");
-    ESP_LOGI(TAG, "  ESP32-C6 Matter CW-WW LED Controller Startup ");
+    ESP_LOGI(TAG, "  ESP32-C3 Matter CW-WW LED Controller Startup ");
     ESP_LOGI(TAG, "===============================================");
 
     // 1. Initialize NVS
@@ -151,9 +151,11 @@ extern "C" void app_main()
     color_temperature_light::config_t light_config;
     light_config.on_off.on_off = false;
     light_config.level_control.current_level = 254;
-    light_config.color_control.color_mode = 2; // ColorTemperatureMireds
-    light_config.color_control.enhanced_color_mode = 2;
-    light_config.color_control.color_temperature_mireds = 250; // ~4000K
+    light_config.color_control_color_temperature.color_temperature_mireds = 250; // ~4000K
+    light_config.color_control_color_temperature.color_temp_physical_min_mireds = CONFIG_MIN_COLOR_TEMP_MIREDS;
+    light_config.color_control_color_temperature.color_temp_physical_max_mireds = CONFIG_MAX_COLOR_TEMP_MIREDS;
+    light_config.color_control_color_temperature.couple_color_temp_to_level_min_mireds = CONFIG_MIN_COLOR_TEMP_MIREDS;
+    light_config.color_control_color_temperature.start_up_color_temperature_mireds = 250;
 
     endpoint_t *endpoint = color_temperature_light::create(node, &light_config, ENDPOINT_FLAG_NONE, NULL);
     if (!endpoint) {
@@ -164,22 +166,12 @@ extern "C" void app_main()
     light_endpoint_id = endpoint::get_id(endpoint);
     ESP_LOGI(TAG, "Color Temperature Light created with endpoint_id: %d", light_endpoint_id);
 
-    // 6. Set Physical Min/Max bounds for Color Temperature
-    cluster_t *color_cluster = cluster::get(endpoint, ColorControl::Id);
-    if (color_cluster) {
-        cluster::color_control::attribute::create_color_temp_physical_min_mireds(color_cluster, CONFIG_MIN_COLOR_TEMP_MIREDS);
-        cluster::color_control::attribute::create_color_temp_physical_max_mireds(color_cluster, CONFIG_MAX_COLOR_TEMP_MIREDS);
-        cluster::color_control::attribute::create_couple_color_temp_to_level_min_mireds(color_cluster, CONFIG_MIN_COLOR_TEMP_MIREDS);
-        cluster::color_control::attribute::create_start_up_color_temperature_mireds(color_cluster, 250);
-    }
-
-    // 7. Initialize OTA Requestor
+    // 6. Initialize OTA Requestor
 #if CONFIG_ENABLE_OTA_REQUESTOR
-    ota_requestor::config_t ota_config;
-    ota_requestor::init(&ota_config);
+    esp_matter_ota_requestor_init();
 #endif
 
-    // 8. Start Matter Stack
+    // 7. Start Matter Stack
     err = esp_matter::start(app_event_cb);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start Matter stack: %s", esp_err_to_name(err));
@@ -199,5 +191,6 @@ extern "C" void app_main()
     char active_mac[32] = {0};
     mac_config_get_current_str(active_mac, sizeof(active_mac));
     ESP_LOGI(TAG, "Active Wi-Fi Station MAC: %s", active_mac);
-    ESP_LOGI(TAG, "Matter QR code and Manual Pairing Code will be printed above by CHIP core.");
+
+    PrintOnboardingCodes(chip::RendezvousInformationFlag::kBLE);
 }
