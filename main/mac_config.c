@@ -1,0 +1,140 @@
+#include "mac_config.h"
+#include <esp_log.h>
+#include <esp_mac.h>
+#include <nvs.h>
+#include <nvs_flash.h>
+#include <stdio.h>
+#include <string.h>
+
+static const char *TAG = "mac_config";
+static const char *NVS_NAMESPACE = "custom_cfg";
+static const char *NVS_KEY_MAC = "custom_mac";
+
+static bool parse_mac_string(const char *str, uint8_t mac[6])
+{
+    if (!str || strlen(str) < 17) {
+        return false;
+    }
+
+    unsigned int b[6];
+    int parsed = sscanf(str, "%x:%x:%x:%x:%x:%x",
+                        &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]);
+    if (parsed != 6) {
+        parsed = sscanf(str, "%x-%x-%x-%x-%x-%x",
+                        &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]);
+    }
+
+    if (parsed == 6) {
+        for (int i = 0; i < 6; i++) {
+            mac[i] = (uint8_t)b[i];
+        }
+        // Bit 0 of byte 0 must be 0 (unicast)
+        if (mac[0] & 0x01) {
+            ESP_LOGE(TAG, "Invalid MAC: multicast bit is set (byte 0 = 0x%02X)", mac[0]);
+            return false;
+        }
+        return true;
+    }
+
+    return false;
+}
+
+esp_err_t mac_config_set_in_nvs(const char *mac_str)
+{
+    uint8_t dummy_mac[6];
+    if (!parse_mac_string(mac_str, dummy_mac)) {
+        ESP_LOGE(TAG, "Invalid MAC address string: %s", mac_str ? mac_str : "NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Error (%s) opening NVS handle", esp_err_to_name(err));
+        return err;
+    }
+
+    err = nvs_set_str(handle, NVS_KEY_MAC, mac_str);
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+        ESP_LOGI(TAG, "Saved custom MAC %s to NVS", mac_str);
+    } else {
+        ESP_LOGE(TAG, "Failed to write MAC to NVS: %s", esp_err_to_name(err));
+    }
+
+    nvs_close(handle);
+    return err;
+}
+
+esp_err_t mac_config_init(void)
+{
+    uint8_t original_mac[6] = {0};
+    esp_read_mac(original_mac, ESP_MAC_WIFI_STA);
+    ESP_LOGI(TAG, "Factory eFuse Wi-Fi STA MAC: %02X:%02X:%02X:%02X:%02X:%02X",
+             original_mac[0], original_mac[1], original_mac[2],
+             original_mac[3], original_mac[4], original_mac[5]);
+
+    char mac_str[32] = {0};
+    bool found_in_nvs = false;
+
+    // 1. Try reading from NVS
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle);
+    if (err == ESP_OK) {
+        size_t required_size = sizeof(mac_str);
+        err = nvs_get_str(handle, NVS_KEY_MAC, mac_str, &required_size);
+        if (err == ESP_OK && strlen(mac_str) > 0) {
+            ESP_LOGI(TAG, "Read custom MAC from NVS: %s", mac_str);
+            found_in_nvs = true;
+        }
+        nvs_close(handle);
+    }
+
+    // 2. Fall back to Kconfig if enabled and not in NVS
+#if defined(CONFIG_CUSTOM_MAC_ENABLE) && CONFIG_CUSTOM_MAC_ENABLE
+    if (!found_in_nvs) {
+        const char *kconfig_mac = CONFIG_CUSTOM_MAC_ADDRESS;
+        if (kconfig_mac && strlen(kconfig_mac) > 0) {
+            strncpy(mac_str, kconfig_mac, sizeof(mac_str) - 1);
+            ESP_LOGI(TAG, "Using custom MAC from Kconfig: %s", mac_str);
+        }
+    }
+#endif
+
+    // 3. Apply custom MAC if available
+    if (strlen(mac_str) > 0) {
+        uint8_t custom_mac[6];
+        if (parse_mac_string(mac_str, custom_mac)) {
+            err = esp_base_mac_addr_set(custom_mac);
+            if (err == ESP_OK) {
+                ESP_LOGI(TAG, "Successfully applied custom Base MAC: %02X:%02X:%02X:%02X:%02X:%02X",
+                         custom_mac[0], custom_mac[1], custom_mac[2],
+                         custom_mac[3], custom_mac[4], custom_mac[5]);
+                return ESP_OK;
+            } else {
+                ESP_LOGE(TAG, "esp_base_mac_addr_set failed: %s", esp_err_to_name(err));
+                return err;
+            }
+        } else {
+            ESP_LOGW(TAG, "Provided custom MAC string '%s' is invalid, using eFuse MAC", mac_str);
+        }
+    } else {
+        ESP_LOGI(TAG, "No custom MAC configured, keeping eFuse MAC");
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t mac_config_get_current_str(char *mac_str, size_t max_len)
+{
+    if (!mac_str || max_len < 18) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    uint8_t mac[6] = {0};
+    esp_err_t err = esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    if (err == ESP_OK) {
+        snprintf(mac_str, max_len, "%02X:%02X:%02X:%02X:%02X:%02X",
+                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    }
+    return err;
+}

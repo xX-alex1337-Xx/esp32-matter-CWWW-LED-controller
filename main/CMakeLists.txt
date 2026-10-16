@@ -1,0 +1,16 @@
+idf_component_register(
+    SRCS
+        "app_main.cpp"
+        "app_driver.c"
+        "mac_config.c"
+    INCLUDE_DIRS
+        "."
+    PRIV_REQUIRES
+        esp_matter
+        driver
+        esp_wifi
+        esp_event
+        nvs_flash
+        esp_timer
+        esp_mac
+)

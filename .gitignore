@@ -1,0 +1,26 @@
+# ESP-IDF build directory
+build/
+sdkconfig
+sdkconfig.old
+dependencies.lock
+managed_components/
+
+# Visual Studio Code & IDEs
+.vscode/
+.idea/
+.clangd/
+*.swp
+*~
+
+# Operating System Files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# Python / CMake caches
+__pycache__/
+*.pyc
+CMakeLists.txt.user
+CMakeCache.txt
+CMakeFiles/
