@@ -136,6 +136,16 @@ This project translates the legacy HAA JSON configuration into official Matter s
 * ESP-IDF **v5.1.x** or **v5.2.x** installed.
 * Espressif Matter Framework (`esp-matter`).
 
+### ⚡ Build Performance Optimization (Recommended)
+Matter projects contain thousands of C++ source files. To drastically speed up compilation from ~15 minutes down to **seconds**:
+1. Run the included optimizer script (in PowerShell as Administrator for Defender exclusions):
+   ```powershell
+   .\optimize-build.ps1
+   ```
+   * Enables `ccache` with a 20 GB cache size.
+   * Disables Windows Defender I/O lock contention on compiler processes and project folders.
+   * Removes unused OpenThread/CHIP test modules from the build graph.
+
 ### 1. Set Target
 ```bash
 idf.py set-target esp32c6
