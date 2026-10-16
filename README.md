@@ -1,12 +1,12 @@
-# ESP32-C6 Matter CW-WW (CCT) LED Strip Controller
+# ESP32 Matter CW-WW (CCT) LED Strip Controller
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Matter](https://img.shields.io/badge/Matter-1.x-blue.svg)](https://csa-iot.org/all-solutions/matter/)
-[![Target: ESP32-C6](https://img.shields.io/badge/ESP32--C6-RISC--V-red.svg)](https://www.espressif.com/en/products/socs/esp32-c6)
+[![Target: ESP32-C3 / ESP32-C6](https://img.shields.io/badge/Target-ESP32--C3%20%7C%20C6-red.svg)](https://www.espressif.com/en/products/socs)
 [![ESP-IDF](https://img.shields.io/badge/ESP--IDF-v5.1%2B-green.svg)](https://github.com/espressif/esp-idf)
 [![Framework: ESP-Matter](https://img.shields.io/badge/Framework-esp--matter-orange.svg)](https://github.com/espressif/esp-matter)
 
-Official Espressif Matter firmware for a Dual-Channel Tunable White (Cool White / Warm White) LED controller built on the **ESP32-C6**, running **Matter over Wi-Fi** (2.4 GHz Wi-Fi 6) with Bluetooth Low Energy (BLE) commissioning.
+Production-grade Espressif Matter firmware for a Dual-Channel Tunable White (Cool White / Warm White) LED controller built on the **ESP32-C3** (default) or **ESP32-C6**, running **Matter over Wi-Fi** with Bluetooth Low Energy (BLE) commissioning.
 
 Compatible natively with **Apple Home**, **Google Home**, **Home Assistant**, and **Samsung SmartThings**.
 
@@ -23,13 +23,13 @@ Compatible natively with **Apple Home**, **Google Home**, **Home Assistant**, an
 │  └────────┬─────────┘  └────────┬─────────┘  └────────┬─────────┘  │
 └───────────┼─────────────────────┼─────────────────────┼────────────┘
             │                     │                     │
-            │ BLE / Wi-Fi 6       │ Wi-Fi 6 (IPv6)      │ Wi-Fi 6 (IPv6)
+            │ BLE / Wi-Fi         │ Wi-Fi (IPv6)        │ Wi-Fi (IPv6)
             ▼                     ▼                     ▼
 ┌────────────────────────────────────────────────────────────────────┐
 │                 Wireless Transport & Commissioning                 │
 │  ┌───────────────────────────┐  ┌───────────────────────────────┐  │
-│  │ Bluetooth LE Commissioning│  │  2.4 GHz Wi-Fi 6 (Matter)     │  │
-│  │ - Fast BLE Advertising    │  │  - Thread-free Wi-Fi 6 Engine │  │
+│  │ Bluetooth LE Commissioning│  │  2.4 GHz Wi-Fi (Matter)       │  │
+│  │ - Fast BLE Advertising    │  │  - Thread-free Wi-Fi Engine   │  │
 │  │ - Secure Wi-Fi Provision  │  │  - Multi-Admin UDP / IPv6     │  │
 │  └─────────────┬─────────────┘  └───────────────┬───────────────┘  │
 └────────────────┼────────────────────────────────┼──────────────────┘
@@ -37,38 +37,39 @@ Compatible natively with **Apple Home**, **Google Home**, **Home Assistant**, an
                  │ BLE Provisioning Stream        │ Matter Cluster Commands
                  ▼                                ▼
 ┌────────────────────────────────────────────────────────────────────┐
-│                     ESP32-C6 Matter Controller                     │
+│              ESP32-C3 / ESP32-C6 Matter Controller                 │
 │  ┌──────────────────────────────────────────────────────────────┐  │
-│  │            ESP32-C6 SoC (ESP-Matter Core Engine)             │  │
+│  │            ESP-Matter Core Engine (Thread-Safe)              │  │
 │  │  - Endpoint 1: Color Temperature Light (0x010C)              │  │
 │  │  - Clusters: OnOff (0x0006), Level (0x0008), Color (0x0300)  │  │
-│  │  - Non-Volatile Storage (NVS): custom_mac & Fabric State     │  │
+│  │  - Non-Volatile Storage (NVS): Boot State Restoration        │  │
 │  └──────┬───────────────────────┬──────────────────────┬────────┘  │
 │         │                       │                      │           │
 │         ▼                       ▼                      ▼           │
 │  ┌──────────────┐      ┌─────────────────┐    ┌─────────────────┐  │
-│  │ Status Task  │      │   Button Task   │    │  LEDC Hardware  │  │
-│  │   (GPIO 8)   │      │(GPIO 9 Debounce)│    │ (22kHz, 11-Bit) │  │
+│  │ Status Timer │      │ Button ISR/Task │    │ LEDC HW Engine  │  │
+│  │ (esp_timer)  │      │(GPIO 9 Wakeup)  │    │ (4kHz, 12-Bit)  │  │
 │  └──────┬───────┘      └────────▲────────┘    └───────┬───┬─────┘  │
 └─────────┼───────────────────────┼─────────────────────┼───┼────────┘
           │                       │                     │   │
-          │ GPIO 8 (Output)       │ GPIO 9 (Input)      │   │
+          │ GPIO 8 (Active-Low)   │ GPIO 9 (Input)      │   │
           ▼                       │                     │   │
 ┌───────────────────┐    ┌────────┴────────┐            │   │
 │    Status LED     │    │   Push Button   │            │   │
 │  - Fast: Pairing  │    │   (BOOT / SW1)  │            │   │
 │  - Off: Paired    │    │ - Short: Toggle │            │   │
-│  - Pulse: Identify│    │ - 10s: Reset    │            │   │
+│  - Slow: Identify │    │ - 10s: Reset    │            │   │
 └───────────────────┘    └─────────────────┘            │   │
                                                         │   │
                 ┌───────────────────────────────────────┘   │
                 │ GPIO 0 PWM (CW)           ┌───────────────┘
-                │                           │ GPIO 1 PWM (WW)
+                │                           │ GPIO 1 PWM (WW, Phase-Shifted)
                 ▼                           ▼
   ┌───────────────────────────┐       ┌───────────────────────────┐
   │  N-MOSFET: Cool White CW  │       │  N-MOSFET: Warm White WW  │
-  │  - Logic-Level (IRLZ44N)  │       │  - Logic-Level (IRLZ44N)  │
+  │  - Logic-Level (AO3400A)  │       │  - Logic-Level (AO3400A)  │
   │  - 100 Ω Gate / 10 kΩ PD  │       │  - 100 Ω Gate / 10 kΩ PD  │
+  │  - Reverse Schottky Diode │       │  - Reverse Schottky Diode │
   └─────────────┬─────────────┘       └─────────────┬─────────────┘
                 │                                   │
                 │ Cool White PWM                    │ Warm White PWM
@@ -85,17 +86,34 @@ Compatible natively with **Apple Home**, **Google Home**, **Home Assistant**, an
 
 | Function | Pin | Signal Type | Driver Circuit | Notes |
 | :--- | :--- | :--- | :--- | :--- |
-| **Cool White (CW)** | `GPIO 0` | Active-High PWM | N-Channel MOSFET Gate | 22 kHz, 11-bit resolution |
-| **Warm White (WW)** | `GPIO 1` | Active-High PWM | N-Channel MOSFET Gate | 22 kHz, 11-bit resolution |
-| **Status LED** | `GPIO 8` | Active-Low Output | Current-limiting resistor (e.g. 1kΩ) | Fast blink = pairing mode; Off = paired |
-| **Control Button** | `GPIO 9` | Active-Low Input | Internal pull-up to 3.3V | BOOT pin: Short press = toggle; 10s hold = reset |
+| **Cool White (CW)** | `GPIO 0` | Active-High PWM | N-Channel MOSFET Gate | 4 kHz, 12-bit resolution (`hpoint = 0`) |
+| **Warm White (WW)** | `GPIO 1` | Active-High PWM | N-Channel MOSFET Gate | 4 kHz, 12-bit resolution (`hpoint = 2048`, 180° phase offset) |
+| **Status LED** | `GPIO 8` | Active-Low Output | Current-limiting resistor (e.g. 1kΩ) | **Strapping Pin!** Keep Active-Low to 3.3V. |
+| **Control Button** | `GPIO 9` | Active-Low Input | Internal pull-up to 3.3V | **Strapping Pin (BOOT)!** Keep external filter cap $\le 10\text{ nF}$. |
 
-### Recommended MOSFET Wiring
-For driving 12V or 24V LED strips:
-* **MOSFETs**: Logic-level N-Channel MOSFETs such as **IRLZ44N**, **AO3400A** (SMD), or **FQP30N06L**.
-* **Gate Resistor**: $100\,\Omega$ series resistor between ESP32-C6 GPIO and MOSFET Gate.
-* **Pull-Down Resistor**: $10\,\text{k}\Omega$ resistor from MOSFET Gate to GND (prevents LED flicker during bootloader stages).
-* **Common Ground**: Ensure 12V/24V power supply GND is tied to ESP32-C6 GND.
+### Recommended Electrical Design & MOSFET Selection
+
+#### 1. Logic-Level MOSFETs at 3.3V Gate Drive
+* Standard power MOSFETs (like the older `IRLZ44N` or `FQP30N06L`) have high gate capacitance ($C_{iss} \approx 3300\text{ pF}$) and require $V_{GS} \ge 4.5\text{–}10\text{ V}$ to achieve full saturation. Direct 3.3V GPIO drive through a $100\,\Omega$ resistor causes significant switching heat and pulse attenuation.
+* **Recommended Direct-Drive MOSFETs ($V_{GS} = 2.5\text{ V}$ rated, low $Q_g$):**
+  * **AO3400A** (SOT-23, 30V / 5.7A, $R_{DS(on)} < 33\,\text{m}\Omega$ @ 2.5V) — ideal for strips up to 3A per channel.
+  * **IRLML6344TRPBF** (SOT-23, 30V / 5A) or **PMV16XN** (SOT-23, 30V / 7A).
+  * **AON7400A** (DFN 3x3, 30V / 30A, $R_{DS(on)} < 2.5\,\text{m}\Omega$) — for high-power installations ($>5\text{A}$).
+* If driving high-capacitance TO-220 MOSFETs or running $>10\text{ A}$, use a dedicated dual gate driver IC (e.g. **TC4427**, **MIC4427**, or **UCC27524**) powered from 12V.
+
+#### 2. Inductive Flyback Protection (Schottky Diodes)
+Long 12V/24V LED strip cables have parasitic inductance ($1\text{–}3\,\mu\text{H}$). Rapid PWM turn-off induces high voltage inductive spikes ($V = L \frac{\mathrm{d}I}{\mathrm{d}t}$) at the MOSFET drain.
+* Install a fast **Schottky diode** (e.g. **SS34** / **1N5822**, 3A, 40V) across each LED channel:
+  * **Cathode** $\rightarrow$ Strip $+12\text{V} / +24\text{V}$ rail
+  * **Anode** $\rightarrow$ MOSFET Drain (`CW-` and `WW-`)
+
+#### 3. Critical Strapping Pin Rules (ESP32-C3 & ESP32-C6)
+* **GPIO 8**: Determines boot mode on reset. Must be **HIGH** during reset to allow entering serial download boot mode (`GPIO 9 = LOW`). Wire the Status LED as **Active-Low** (LED cathode to GPIO 8, anode via resistor to 3.3V) so GPIO 8 is not pulled down to GND at boot.
+* **GPIO 9**: BOOT pin. Must be **HIGH** for normal SPI flash boot. If adding an external debounce capacitor to the button, keep it $\le 10\text{ nF}$; larger capacitors hold GPIO 9 LOW during power-up reset, trapping the ESP32 in download mode.
+
+#### 4. Power Supply Decoupling & Phase Interleaving
+* Place a $220\,\mu\text{F}\text{–}470\,\mu\text{F}$ low-ESR electrolytic capacitor + a $10\,\mu\text{F}$ ceramic MLCC directly across the 12V/24V input near the MOSFET sources.
+* The firmware configures the WW channel with an interleaved **180° phase offset** (`hpoint = 2048`). Because constant-power mixing guarantees $D_{CW} + D_{WW} \le 100\%$, CW and WW turn on at opposite phases, cutting peak PSU ripple current in half.
 
 ---
 
@@ -103,88 +121,57 @@ For driving 12V or 24V LED strips:
 
 * **Matter Device Type**: `Color Temperature Light` (`0x010C`):
   * **OnOff Cluster**: Power control with non-volatile state restoration after power cycles.
-  * **LevelControl Cluster**: Brightness control (1–254) using a smooth **$\gamma = 2.2$ gamma-corrected** logarithmic curve.
-  * **ColorControl Cluster**: Tunable white from **2700K (370 Mireds)** to **6500K (153 Mireds)**.
-* **Matter over Wi-Fi**: Directly connects to your standard 2.4 GHz Wi-Fi router. **No Thread Border Router is required.**
-* **Custom Static MAC Address**:
-  * Configurable via `idf.py menuconfig` (`CONFIG_CUSTOM_MAC_ADDRESS`).
-  * Runtime override via NVS storage (namespace `custom_cfg`, key `custom_mac`).
-  * Applied via `esp_base_mac_addr_set()` before Wi-Fi / BLE stacks initialize.
-* **Dual OTA Partitions**: Standard Matter Over-The-Air Requestor cluster enabled for secure wireless firmware updates.
+  * **LevelControl Cluster**: Brightness control (1–254) with smooth **$\gamma = 2.2$ gamma correction**.
+  * **ColorControl Cluster**: Constant-power tunable white mixing from **2700K (370 Mireds)** to **6500K (153 Mireds)**.
+* **Zero Low-End Dead Zone**: Guarantees visible illumination even at 1% brightness level.
+* **Hardware-Accelerated Transitions**: Smooth 250 ms fade curves handled directly by LEDC silicon.
+* **Thread-Safe Architecture**: Physical button events safely scheduled onto the Matter event thread.
+* **Low Idle Power Consumption**: Interrupt-driven button handling and `esp_timer`-driven status indication.
+* **Custom Static MAC Address**: Configurable via Kconfig or runtime NVS override (`custom_cfg` / `custom_mac`).
+* **Dual OTA Partitions & Rollback**: Automatic bootloader rollback protects against bricked OTA updates.
 
 ---
 
-## 3. Migration from HomeKit Accessory Architect (HAA)
-
-This project translates the legacy HAA JSON configuration into official Matter standard:
-
-| HAA JSON Parameter | HAA Meaning | ESP32-C6 Matter Equivalent |
-| :--- | :--- | :--- |
-| `"b": [ [9, 5] ]` | Button on GPIO 9 | Handled by `app_driver.c` (Short-press toggle, 10s factory reset) |
-| `"io": [ [[0, 1], 9] ]` | GPIO 0, 1 as PWM outputs | LEDC Channel 0 (GPIO 0: CW) & Channel 1 (GPIO 1: WW) |
-| `"io": [ [[8], 2] ]` | GPIO 8 as output | Status LED driver (Active-Low) |
-| `"l": 8` | Status LED on GPIO 8 | BLE Commissioning indication & identifying blink |
-| `"y": [22000]` | 22 kHz PWM Frequency | Configured in LEDC Timer 0 (`CONFIG_PWM_FREQUENCY_HZ = 22000`) |
-| `"t": 30, "ty": 1` | CCT Lightbulb Accessory | Matter `ESP_MATTER_DEVICE_COLOR_TEMPERATURE_LIGHT` (`0x010C`) |
-| `"cm": [3, 4]` | Color Temp & Brightness | Matter `LevelControl` & `ColorControl` clusters |
-
----
-
-## 4. How to Build & Flash
+## 3. How to Build & Flash
 
 ### Prerequisites
 * ESP-IDF **v5.1.x** or **v5.2.x** installed.
 * Espressif Matter Framework (`esp-matter`).
 
-### ⚡ Build Performance Optimization (Recommended)
-Matter projects contain thousands of C++ source files. To drastically speed up compilation from ~15 minutes down to **seconds**:
-1. Run the included optimizer script (in PowerShell as Administrator for Defender exclusions):
-   ```powershell
-   .\optimize-build.ps1
-   ```
-   * Enables `ccache` with a 20 GB cache size.
-   * Disables Windows Defender I/O lock contention on compiler processes and project folders.
-   * Removes unused OpenThread/CHIP test modules from the build graph.
-
-### 1. Set Target
-```bash
-idf.py set-target esp32c6
+### 1. Build Optimization (Recommended on Windows)
+```powershell
+.\optimize-build.ps1
 ```
 
-### 2. Configure (Optional)
-To adjust the custom MAC address, GPIOs, or PWM frequency:
+### 2. Set Target (Default: ESP32-C3)
+```bash
+idf.py set-target esp32c3
+```
+*(To build for ESP32-C6, run `idf.py set-target esp32c6`).*
+
+### 3. Configure (Optional)
 ```bash
 idf.py menuconfig
 ```
 Navigate to:
-> `CW-WW LED Controller Configuration` $\rightarrow$ `Custom MAC Address Configuration`
+> `CW-WW LED Controller Configuration`
 
-### 3. Build & Flash
+### 4. Build, Flash & Monitor
 ```bash
 idf.py build
 idf.py -p COMx flash monitor
 ```
-*(Replace `COMx` with your actual serial port, e.g., `COM3` on Windows or `/dev/ttyUSB0` on Linux/macOS).*
 
 ---
 
-## 5. Pairing with Smart Home Ecosystems
+## 4. Pairing & Operation
 
-1. Power on the ESP32-C6. The status LED (`GPIO 8`) will blink quickly (pairing mode).
-2. The serial console will print the Matter QR code URL and the **11-digit Manual Pairing Code** (e.g., `3497-0112-332`).
-3. Open your smart home app:
-   * **Apple Home**: Tap `+` $\rightarrow$ **Add Accessory** $\rightarrow$ Scan QR or tap **More options...** and select the controller.
-   * **Google Home**: Tap `+` $\rightarrow$ **Set up device** $\rightarrow$ **Matter-enabled device**.
-   * **Home Assistant**: Go to **Settings** $\rightarrow$ **Devices & Services** $\rightarrow$ **Add Integration** $\rightarrow$ **Matter**.
-4. Once paired, the status LED turns off, and the controller is ready for use!
-
----
-
-## 6. Factory Reset
-
-To unpair the device and clear all stored Wi-Fi credentials and Matter fabric certificates:
-1. Press and hold the push button (`GPIO 9`) for **10 seconds**.
-2. The controller will log the reset command, erase its Matter credentials, and reboot into BLE pairing mode (`GPIO 8` fast blink).
+1. Power on the controller. The status LED (`GPIO 8`) will blink quickly (pairing mode).
+2. The serial console prints the QR code URL and the **11-digit Manual Pairing Code**.
+3. Open **Apple Home**, **Google Home**, or **Home Assistant** $\rightarrow$ **Add Accessory** $\rightarrow$ Scan or type pairing code.
+4. **Physical Controls**:
+   * **Short Press (GPIO 9)**: Toggle On / Off.
+   * **10s Long Press (GPIO 9)**: Clear Matter fabrics and trigger factory reset.
 
 ---
 

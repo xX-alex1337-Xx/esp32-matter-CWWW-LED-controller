@@ -17,27 +17,36 @@ static uint8_t s_custom_mac[6] = {0};
 
 static bool parse_mac_string(const char *str, uint8_t mac[6])
 {
-    if (!str || strlen(str) < 17) {
+    if (!str || strlen(str) != 17) {
         return false;
     }
 
     unsigned int b[6];
-    int parsed = sscanf(str, "%x:%x:%x:%x:%x:%x",
-                        &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]);
-    if (parsed != 6) {
-        parsed = sscanf(str, "%x-%x-%x-%x-%x-%x",
-                        &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]);
-    }
+    char sep;
+    int parsed = sscanf(str, "%2x%c%2x%c%2x%c%2x%c%2x%c%2x",
+                        &b[0], &sep, &b[1], &sep, &b[2], &sep,
+                        &b[3], &sep, &b[4], &sep, &b[5]);
 
-    if (parsed == 6) {
+    if (parsed == 11) {
         for (int i = 0; i < 6; i++) {
+            if (b[i] > 0xFF) {
+                ESP_LOGE(TAG, "Invalid MAC byte value: 0x%X", b[i]);
+                return false;
+            }
             mac[i] = (uint8_t)b[i];
         }
+
         // Bit 0 of byte 0 must be 0 (unicast)
         if (mac[0] & 0x01) {
             ESP_LOGE(TAG, "Invalid MAC: multicast bit is set (byte 0 = 0x%02X)", mac[0]);
             return false;
         }
+
+        // Bit 1 of byte 0 should be 1 (locally administered)
+        if (!(mac[0] & 0x02)) {
+            ESP_LOGW(TAG, "Warning: Custom MAC byte 0 (0x%02X) does not have locally administered bit set (bit 1)", mac[0]);
+        }
+
         return true;
     }
 
@@ -137,8 +146,17 @@ esp_err_t mac_config_init(void)
                 ESP_LOGE(TAG, "esp_base_mac_addr_set failed: %s", esp_err_to_name(err));
             }
 
+            // Ensure default event loop exists before registering event handler
+            esp_err_t loop_err = esp_event_loop_create_default();
+            if (loop_err != ESP_OK && loop_err != ESP_ERR_INVALID_STATE) {
+                ESP_LOGW(TAG, "esp_event_loop_create_default returned: %s", esp_err_to_name(loop_err));
+            }
+
             // Register event handler to override Wi-Fi STA MAC as soon as station starts
-            esp_event_handler_instance_register(WIFI_EVENT, WIFI_EVENT_STA_START, &wifi_event_handler, NULL, NULL);
+            err = esp_event_handler_instance_register(WIFI_EVENT, WIFI_EVENT_STA_START, &wifi_event_handler, NULL, NULL);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "Failed to register WIFI_EVENT_STA_START handler: %s", esp_err_to_name(err));
+            }
 
             return ESP_OK;
         } else {

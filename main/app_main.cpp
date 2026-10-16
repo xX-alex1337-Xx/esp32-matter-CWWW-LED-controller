@@ -2,6 +2,7 @@
 #include <esp_log.h>
 #include <esp_matter.h>
 #include <esp_matter_ota.h>
+#include <esp_ota_ops.h>
 #include <nvs_flash.h>
 #include <setup_payload/OnboardingCodesUtil.h>
 
@@ -91,25 +92,38 @@ static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
 static void button_callback(bool short_press_toggle, bool long_press_reset)
 {
     if (short_press_toggle) {
-        // Read current On/Off attribute
-        node_t *node = node::get();
-        endpoint_t *ep = endpoint::get(node, light_endpoint_id);
-        cluster_t *cl = cluster::get(ep, OnOff::Id);
-        attribute_t *attr = attribute::get(cl, OnOff::Attributes::OnOff::Id);
+        // Schedule onto CHIP stack thread to ensure thread safety
+        CHIP_ERROR cerr = chip::DeviceLayer::PlatformMgr().ScheduleWork([](intptr_t arg) {
+            node_t *node = node::get();
+            endpoint_t *ep = endpoint::get(node, light_endpoint_id);
+            if (!ep) return;
+            cluster_t *cl = cluster::get(ep, OnOff::Id);
+            if (!cl) return;
+            attribute_t *attr = attribute::get(cl, OnOff::Attributes::OnOff::Id);
+            if (!attr) return;
 
-        esp_matter_attr_val_t val = esp_matter_invalid(NULL);
-        attribute::get_val(attr, &val);
+            esp_matter_attr_val_t val = esp_matter_invalid(NULL);
+            attribute::get_val(attr, &val);
 
-        // Toggle state
-        val.val.b = !val.val.b;
-        ESP_LOGI(TAG, "Toggling On/Off to %d via button press", val.val.b);
+            // Toggle state
+            val.val.b = !val.val.b;
+            ESP_LOGI(TAG, "Toggling On/Off to %d via button press", val.val.b);
 
-        // Update attribute in Matter data model (triggers attribute update callback & reports to fabric)
-        attribute::update(light_endpoint_id, OnOff::Id, OnOff::Attributes::OnOff::Id, &val);
+            // Update attribute in Matter data model (triggers attribute update callback & reports to fabric)
+            attribute::update(light_endpoint_id, OnOff::Id, OnOff::Attributes::OnOff::Id, &val);
+        }, 0);
+        if (cerr != CHIP_NO_ERROR) {
+            ESP_LOGE(TAG, "Failed to schedule button toggle: %" CHIP_ERROR_FORMAT, cerr.Format());
+        }
     } else if (long_press_reset) {
         ESP_LOGW(TAG, "Triggering Matter Factory Reset from button long press...");
         app_driver_status_led_set_mode(STATUS_LED_MODE_BLINK_FAST);
-        factory_reset();
+        CHIP_ERROR cerr = chip::DeviceLayer::PlatformMgr().ScheduleWork([](intptr_t arg) {
+            factory_reset();
+        }, 0);
+        if (cerr != CHIP_NO_ERROR) {
+            ESP_LOGE(TAG, "Failed to schedule factory reset: %" CHIP_ERROR_FORMAT, cerr.Format());
+        }
     }
 }
 
@@ -118,7 +132,7 @@ extern "C" void app_main()
     esp_err_t err = ESP_OK;
 
     ESP_LOGI(TAG, "===============================================");
-    ESP_LOGI(TAG, "  ESP32-C3 Matter CW-WW LED Controller Startup ");
+    ESP_LOGI(TAG, "  ESP32 (" CONFIG_IDF_TARGET ") Matter CW-WW LED Controller Startup ");
     ESP_LOGI(TAG, "===============================================");
 
     // 1. Initialize NVS
@@ -177,6 +191,51 @@ extern "C" void app_main()
         ESP_LOGE(TAG, "Failed to start Matter stack: %s", esp_err_to_name(err));
         return;
     }
+
+    // 8. Synchronize physical hardware outputs with restored Matter NVS attributes
+    node_t *active_node = node::get();
+    endpoint_t *active_ep = endpoint::get(active_node, light_endpoint_id);
+    if (active_ep) {
+        bool restored_power = false;
+        uint8_t restored_brightness = 254;
+        uint16_t restored_mireds = 250;
+
+        cluster_t *on_off_cl = cluster::get(active_ep, OnOff::Id);
+        if (on_off_cl) {
+            attribute_t *attr = attribute::get(on_off_cl, OnOff::Attributes::OnOff::Id);
+            esp_matter_attr_val_t val = esp_matter_invalid(NULL);
+            if (attribute::get_val(attr, &val) == ESP_OK) {
+                restored_power = val.val.b;
+            }
+        }
+
+        cluster_t *lvl_cl = cluster::get(active_ep, LevelControl::Id);
+        if (lvl_cl) {
+            attribute_t *attr = attribute::get(lvl_cl, LevelControl::Attributes::CurrentLevel::Id);
+            esp_matter_attr_val_t val = esp_matter_invalid(NULL);
+            if (attribute::get_val(attr, &val) == ESP_OK) {
+                restored_brightness = val.val.u8;
+            }
+        }
+
+        cluster_t *color_cl = cluster::get(active_ep, ColorControl::Id);
+        if (color_cl) {
+            attribute_t *attr = attribute::get(color_cl, ColorControl::Attributes::ColorTemperatureMireds::Id);
+            esp_matter_attr_val_t val = esp_matter_invalid(NULL);
+            if (attribute::get_val(attr, &val) == ESP_OK) {
+                restored_mireds = val.val.u16;
+            }
+        }
+
+        ESP_LOGI(TAG, "Restored state on startup: Power=%d, Brightness=%u, ColorTemp=%u Mireds",
+                 restored_power, restored_brightness, restored_mireds);
+        app_driver_light_update(restored_power, restored_brightness, restored_mireds);
+    }
+
+    // 9. Cancel OTA rollback after successful startup
+#if CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE
+    esp_ota_mark_app_valid_cancel_rollback();
+#endif
 
     // Check commissioning status to set initial status LED pattern
     if (chip::Server::GetInstance().GetFabricTable().FabricCount() == 0) {
