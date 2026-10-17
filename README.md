@@ -48,7 +48,7 @@ Compatible natively with **Apple Home**, **Google Home**, **Home Assistant**, an
 │         ▼                       ▼                      ▼           │
 │  ┌──────────────┐      ┌─────────────────┐    ┌─────────────────┐  │
 │  │ Status Timer │      │ Button ISR/Task │    │ LEDC HW Engine  │  │
-│  │ (esp_timer)  │      │(GPIO 9 Wakeup)  │    │ (4kHz, 12-Bit)  │  │
+│  │ (esp_timer)  │      │(GPIO 9 Wakeup)  │    │ (4kHz, 13-Bit)  │  │
 │  └──────┬───────┘      └────────▲────────┘    └───────┬───┬─────┘  │
 └─────────┼───────────────────────┼─────────────────────┼───┼────────┘
           │                       │                     │   │
@@ -63,7 +63,7 @@ Compatible natively with **Apple Home**, **Google Home**, **Home Assistant**, an
                                                         │   │
                 ┌───────────────────────────────────────┘   │
                 │ GPIO 0 PWM (CW)           ┌───────────────┘
-                │                           │ GPIO 1 PWM (WW, Phase-Shifted)
+                │                           │ GPIO 1 PWM (WW)
                 ▼                           ▼
   ┌───────────────────────────┐       ┌───────────────────────────┐
   │  N-MOSFET: Cool White CW  │       │  N-MOSFET: Warm White WW  │
@@ -86,8 +86,8 @@ Compatible natively with **Apple Home**, **Google Home**, **Home Assistant**, an
 
 | Function | Pin | Signal Type | Driver Circuit | Notes |
 | :--- | :--- | :--- | :--- | :--- |
-| **Cool White (CW)** | `GPIO 0` | Active-High PWM | N-Channel MOSFET Gate | 4 kHz, 12-bit resolution (`hpoint = 0`) |
-| **Warm White (WW)** | `GPIO 1` | Active-High PWM | N-Channel MOSFET Gate | 4 kHz, 12-bit resolution (`hpoint = 2048`, 180° phase offset) |
+| **Cool White (CW)** | `GPIO 0` | Active-High PWM | N-Channel MOSFET Gate | 4 kHz, 13-bit resolution (`8191` steps) |
+| **Warm White (WW)** | `GPIO 1` | Active-High PWM | N-Channel MOSFET Gate | 4 kHz, 13-bit resolution (`8191` steps) |
 | **Status LED** | `GPIO 8` | Active-Low Output | Current-limiting resistor (e.g. 1kΩ) | **Strapping Pin!** Keep Active-Low to 3.3V. |
 | **Control Button** | `GPIO 9` | Active-Low Input | Internal pull-up to 3.3V | **Strapping Pin (BOOT)!** Keep external filter cap $\le 10\text{ nF}$. |
 
@@ -111,9 +111,8 @@ Long 12V/24V LED strip cables have parasitic inductance ($1\text{–}3\,\mu\text
 * **GPIO 8**: Determines boot mode on reset. Must be **HIGH** during reset to allow entering serial download boot mode (`GPIO 9 = LOW`). Wire the Status LED as **Active-Low** (LED cathode to GPIO 8, anode via resistor to 3.3V) so GPIO 8 is not pulled down to GND at boot.
 * **GPIO 9**: BOOT pin. Must be **HIGH** for normal SPI flash boot. If adding an external debounce capacitor to the button, keep it $\le 10\text{ nF}$; larger capacitors hold GPIO 9 LOW during power-up reset, trapping the ESP32 in download mode.
 
-#### 4. Power Supply Decoupling & Phase Interleaving
+#### 4. Power Supply Decoupling
 * Place a $220\,\mu\text{F}\text{–}470\,\mu\text{F}$ low-ESR electrolytic capacitor + a $10\,\mu\text{F}$ ceramic MLCC directly across the 12V/24V input near the MOSFET sources.
-* The firmware configures the WW channel with an interleaved **180° phase offset** (`hpoint = 2048`). Because constant-power mixing guarantees $D_{CW} + D_{WW} \le 100\%$, CW and WW turn on at opposite phases, cutting peak PSU ripple current in half.
 
 ---
 
@@ -122,11 +121,12 @@ Long 12V/24V LED strip cables have parasitic inductance ($1\text{–}3\,\mu\text
 * **Matter Device Type**: `Color Temperature Light` (`0x010C`):
   * **OnOff Cluster**: Power control with non-volatile state restoration after power cycles.
   * **LevelControl Cluster**: Brightness control (1–254) with smooth **$\gamma = 2.2$ gamma correction**.
-  * **ColorControl Cluster**: Constant-power tunable white mixing from **2700K (370 Mireds)** to **6500K (153 Mireds)**.
-* **Zero Low-End Dead Zone**: Guarantees visible illumination even at 1% brightness level.
-* **Hardware-Accelerated Transitions**: Smooth 250 ms fade curves handled directly by LEDC silicon.
+  * **ColorControl Cluster**: Full **50 to 400 Mired** range unlocking the complete **Light Blue $\rightarrow$ White $\rightarrow$ Orange** Apple Home spectrum mapped $0\text{–}100\%$ across CW/WW.
+* **Ratio-Locked 200 Hz Smooth Fade**: Eliminates turn-on/turn-off color shifts by locking the CW/WW chromaticity ratio while ramping luminance.
+* **Always-On Wi-Fi Robustness**: Disables Wi-Fi modem sleep (`WIFI_PS_NONE`), enforces `HT20` 20 MHz bandwidth and `20 dBm` max TX power, and runs a 60s mDNS/reconnect watchdog for zero *"No Response"* dropouts in Apple Home.
+* **Zero Low-End Dead Zone**: Guarantees visible illumination with accurate CW/WW balance even at 1% brightness.
 * **Thread-Safe Architecture**: Physical button events safely scheduled onto the Matter event thread.
-* **Low Idle Power Consumption**: Interrupt-driven button handling and `esp_timer`-driven status indication.
+* **Low Idle CPU Overhead**: Interrupt-driven button handling and `esp_timer`-driven status indication.
 * **Custom Static MAC Address**: Configurable via Kconfig or runtime NVS override (`custom_cfg` / `custom_mac`).
 * **Dual OTA Partitions & Rollback**: Automatic bootloader rollback protects against bricked OTA updates.
 

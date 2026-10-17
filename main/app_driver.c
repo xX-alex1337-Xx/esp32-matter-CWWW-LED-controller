@@ -40,11 +40,11 @@ static const char *TAG = "app_driver";
 #endif
 
 #ifndef CONFIG_MIN_COLOR_TEMP_MIREDS
-#define CONFIG_MIN_COLOR_TEMP_MIREDS 153 // 6500K
+#define CONFIG_MIN_COLOR_TEMP_MIREDS 50
 #endif
 
 #ifndef CONFIG_MAX_COLOR_TEMP_MIREDS
-#define CONFIG_MAX_COLOR_TEMP_MIREDS 370 // 2700K
+#define CONFIG_MAX_COLOR_TEMP_MIREDS 400
 #endif
 
 #ifndef CONFIG_FACTORY_RESET_HOLD_TIME_SEC
@@ -53,8 +53,8 @@ static const char *TAG = "app_driver";
 
 // Select optimal PWM resolution based on frequency
 #if (CONFIG_PWM_FREQUENCY_HZ <= 4000)
-#define LEDC_RESOLUTION       LEDC_TIMER_12_BIT
-#define LEDC_MAX_DUTY         ((1 << 12) - 1) // 4095
+#define LEDC_RESOLUTION       LEDC_TIMER_13_BIT
+#define LEDC_MAX_DUTY         ((1 << 13) - 1) // 8191
 #else
 #define LEDC_RESOLUTION       LEDC_TIMER_11_BIT
 #define LEDC_MAX_DUTY         ((1 << 11) - 1) // 2047
@@ -63,13 +63,24 @@ static const char *TAG = "app_driver";
 #define LEDC_CW_CHANNEL       LEDC_CHANNEL_0
 #define LEDC_WW_CHANNEL       LEDC_CHANNEL_1
 
-// Phase offset for WW channel to interleave switching and halve power supply current ripple
-#define LEDC_WW_HPOINT_OFFSET ((LEDC_MAX_DUTY + 1) / 2)
+// Ratio-locked software fade tick interval (5 ms = 200 Hz update rate)
+#define FADE_TICK_MS          5
 
 // Internal state
 static bool s_power = false;
-static uint8_t s_brightness = 254; // 1-254
-static uint16_t s_color_temp_mireds = 250; // ~4000K
+static uint8_t s_brightness = 254;          // 1-254
+static uint16_t s_color_temp_mireds = 225;  // Midpoint of 50..400 Mireds
+
+// Fade engine state (protected by s_driver_mutex)
+static float s_current_lum = 0.0f;
+static float s_target_lum = 0.0f;
+static float s_lum_step = 0.0f;
+
+static float s_current_ratio = 0.5f;
+static float s_target_ratio = 0.5f;
+static float s_ratio_step = 0.0f;
+
+static esp_timer_handle_t s_fade_timer = NULL;
 static status_led_mode_t s_status_mode = STATUS_LED_MODE_BLINK_FAST;
 static app_driver_button_callback_t s_button_cb = NULL;
 static SemaphoreHandle_t s_driver_mutex = NULL;
@@ -85,37 +96,14 @@ static inline float apply_gamma(float linear_val)
     return powf(linear_val, 2.2f);
 }
 
-static void apply_pwm_outputs_locked(void)
+static void write_pwm_channels(float lum, float temp_ratio)
 {
     uint32_t cw_duty = 0;
     uint32_t ww_duty = 0;
 
-    if (s_power && s_brightness > 0) {
-        // 1. Normalized brightness 0.0 to 1.0
-        float norm_bright = (float)s_brightness / 254.0f;
-
-        // 2. Perceptual gamma 2.2 applied to TOTAL power first
-        float total_lum = apply_gamma(norm_bright);
-
-        // 3. Clamp color temperature within mired bounds
-        uint16_t clamped_mireds = s_color_temp_mireds;
-        if (clamped_mireds < CONFIG_MIN_COLOR_TEMP_MIREDS) {
-            clamped_mireds = CONFIG_MIN_COLOR_TEMP_MIREDS;
-        }
-        if (clamped_mireds > CONFIG_MAX_COLOR_TEMP_MIREDS) {
-            clamped_mireds = CONFIG_MAX_COLOR_TEMP_MIREDS;
-        }
-
-        // 4. Calculate warm/cool ratio: 0.0 = Coolest (MIN_MIREDS), 1.0 = Warmest (MAX_MIREDS)
-        float temp_ratio = 0.5f;
-        if (CONFIG_MAX_COLOR_TEMP_MIREDS > CONFIG_MIN_COLOR_TEMP_MIREDS) {
-            temp_ratio = (float)(clamped_mireds - CONFIG_MIN_COLOR_TEMP_MIREDS) /
-                         (float)(CONFIG_MAX_COLOR_TEMP_MIREDS - CONFIG_MIN_COLOR_TEMP_MIREDS);
-        }
-
-        // 5. Constant-power distribution: cw + ww == total_lum
-        float cw_linear = total_lum * (1.0f - temp_ratio);
-        float ww_linear = total_lum * temp_ratio;
+    if (lum > 0.00001f) {
+        float cw_linear = lum * (1.0f - temp_ratio);
+        float ww_linear = lum * temp_ratio;
 
         cw_duty = (uint32_t)roundf(cw_linear * (float)LEDC_MAX_DUTY);
         ww_duty = (uint32_t)roundf(ww_linear * (float)LEDC_MAX_DUTY);
@@ -123,8 +111,8 @@ static void apply_pwm_outputs_locked(void)
         if (cw_duty > LEDC_MAX_DUTY) cw_duty = LEDC_MAX_DUTY;
         if (ww_duty > LEDC_MAX_DUTY) ww_duty = LEDC_MAX_DUTY;
 
-        // 6. Low-brightness floor: ensure the light never drops to 0 PWM when s_power is ON
-        if (cw_duty == 0 && ww_duty == 0) {
+        // Low-brightness floor when power is ON so light never extinguishes at 1% brightness
+        if (cw_duty == 0 && ww_duty == 0 && s_power && s_brightness > 0) {
             if (temp_ratio >= 0.5f) {
                 ww_duty = 1;
             } else {
@@ -133,29 +121,119 @@ static void apply_pwm_outputs_locked(void)
         }
     }
 
-#if (CONFIG_LIGHT_FADE_TIME_MS > 0)
-    ledc_set_fade_with_time(LEDC_LOW_SPEED_MODE, LEDC_CW_CHANNEL, cw_duty, CONFIG_LIGHT_FADE_TIME_MS);
-    ledc_fade_start(LEDC_LOW_SPEED_MODE, LEDC_CW_CHANNEL, LEDC_FADE_NO_WAIT);
-
-    ledc_set_fade_with_time(LEDC_LOW_SPEED_MODE, LEDC_WW_CHANNEL, ww_duty, CONFIG_LIGHT_FADE_TIME_MS);
-    ledc_fade_start(LEDC_LOW_SPEED_MODE, LEDC_WW_CHANNEL, LEDC_FADE_NO_WAIT);
-#else
+    // Update both channels synchronously with hpoint = 0 so CW/WW ratio is 100% locked
     ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CW_CHANNEL, cw_duty);
-    ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CW_CHANNEL);
-
     ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_WW_CHANNEL, ww_duty);
+    ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CW_CHANNEL);
     ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_WW_CHANNEL);
+}
+
+static void fade_timer_callback(void *arg)
+{
+    if (xSemaphoreTake(s_driver_mutex, 0) != pdTRUE) {
+        return;
+    }
+
+    bool lum_done = false;
+    bool ratio_done = false;
+
+    // 1. Advance luminance toward target
+    if (fabsf(s_target_lum - s_current_lum) <= fabsf(s_lum_step) || s_lum_step == 0.0f) {
+        s_current_lum = s_target_lum;
+        lum_done = true;
+    } else {
+        s_current_lum += s_lum_step;
+        if (s_current_lum < 0.0f) s_current_lum = 0.0f;
+        if (s_current_lum > 1.0f) s_current_lum = 1.0f;
+    }
+
+    // 2. Advance color temperature ratio toward target
+    if (fabsf(s_target_ratio - s_current_ratio) <= fabsf(s_ratio_step) || s_ratio_step == 0.0f) {
+        s_current_ratio = s_target_ratio;
+        ratio_done = true;
+    } else {
+        s_current_ratio += s_ratio_step;
+        if (s_current_ratio < 0.0f) s_current_ratio = 0.0f;
+        if (s_current_ratio > 1.0f) s_current_ratio = 1.0f;
+    }
+
+    write_pwm_channels(s_current_lum, s_current_ratio);
+
+    if (lum_done && ratio_done) {
+        esp_timer_stop(s_fade_timer);
+    }
+
+    xSemaphoreGive(s_driver_mutex);
+}
+
+static void update_fade_targets_locked(void)
+{
+    // Clamp color temperature within mired bounds [CONFIG_MIN_COLOR_TEMP_MIREDS, CONFIG_MAX_COLOR_TEMP_MIREDS]
+    uint16_t clamped_mireds = s_color_temp_mireds;
+    if (clamped_mireds < CONFIG_MIN_COLOR_TEMP_MIREDS) {
+        clamped_mireds = CONFIG_MIN_COLOR_TEMP_MIREDS;
+    }
+    if (clamped_mireds > CONFIG_MAX_COLOR_TEMP_MIREDS) {
+        clamped_mireds = CONFIG_MAX_COLOR_TEMP_MIREDS;
+    }
+
+    float new_ratio = 0.5f;
+    if (CONFIG_MAX_COLOR_TEMP_MIREDS > CONFIG_MIN_COLOR_TEMP_MIREDS) {
+        new_ratio = (float)(clamped_mireds - CONFIG_MIN_COLOR_TEMP_MIREDS) /
+                    (float)(CONFIG_MAX_COLOR_TEMP_MIREDS - CONFIG_MIN_COLOR_TEMP_MIREDS);
+    }
+
+    float new_lum = 0.0f;
+    if (s_power && s_brightness > 0) {
+        // Apply perceptual gamma 2.2 with a minimum floor of 0.002f so both CW and WW
+        // maintain their exact color ratio even at 1% brightness
+        float norm_bright = (float)s_brightness / 254.0f;
+        new_lum = apply_gamma(norm_bright);
+        if (new_lum < 0.002f) {
+            new_lum = 0.002f;
+        }
+    }
+
+    // If the light is currently OFF (or just turning ON from dark), lock the color ratio
+    // immediately so there is NEVER a color shift while fading from OFF to ON!
+    if (s_current_lum <= 0.0025f || !s_power) {
+        s_current_ratio = new_ratio;
+    }
+
+    s_target_lum = new_lum;
+    s_target_ratio = new_ratio;
+
+#if (CONFIG_LIGHT_FADE_TIME_MS > 0)
+    if (s_fade_timer) {
+        float steps = (float)CONFIG_LIGHT_FADE_TIME_MS / (float)FADE_TICK_MS;
+        if (steps < 1.0f) steps = 1.0f;
+
+        s_lum_step = (s_target_lum - s_current_lum) / steps;
+        s_ratio_step = (s_target_ratio - s_current_ratio) / steps;
+
+        if (!esp_timer_is_active(s_fade_timer)) {
+            esp_timer_start_periodic(s_fade_timer, FADE_TICK_MS * 1000);
+        }
+    } else {
+        s_current_lum = s_target_lum;
+        s_current_ratio = s_target_ratio;
+        write_pwm_channels(s_current_lum, s_current_ratio);
+    }
+#else
+    s_current_lum = s_target_lum;
+    s_current_ratio = s_target_ratio;
+    write_pwm_channels(s_current_lum, s_current_ratio);
 #endif
 
-    ESP_LOGD(TAG, "PWM updated: Power=%d, Bright=%d, Mireds=%d -> CW_Duty=%lu, WW_Duty=%lu (Max=%d)",
-             s_power, s_brightness, s_color_temp_mireds, (unsigned long)cw_duty, (unsigned long)ww_duty, LEDC_MAX_DUTY);
+    ESP_LOGD(TAG, "Targets updated: Power=%d, Bright=%u, Mireds=%u -> TargetLum=%.4f, TargetRatio=%.3f",
+             s_power, s_brightness, s_color_temp_mireds, s_target_lum, s_target_ratio);
 }
 
 esp_err_t app_driver_light_set_power(bool on)
 {
     if (xSemaphoreTake(s_driver_mutex, portMAX_DELAY) == pdTRUE) {
         s_power = on;
-        apply_pwm_outputs_locked();
+        update_fade_targets_locked();
         xSemaphoreGive(s_driver_mutex);
         return ESP_OK;
     }
@@ -166,7 +244,7 @@ esp_err_t app_driver_light_set_brightness(uint8_t brightness)
 {
     if (xSemaphoreTake(s_driver_mutex, portMAX_DELAY) == pdTRUE) {
         s_brightness = brightness;
-        apply_pwm_outputs_locked();
+        update_fade_targets_locked();
         xSemaphoreGive(s_driver_mutex);
         return ESP_OK;
     }
@@ -177,7 +255,7 @@ esp_err_t app_driver_light_set_color_temp(uint16_t color_temp_mireds)
 {
     if (xSemaphoreTake(s_driver_mutex, portMAX_DELAY) == pdTRUE) {
         s_color_temp_mireds = color_temp_mireds;
-        apply_pwm_outputs_locked();
+        update_fade_targets_locked();
         xSemaphoreGive(s_driver_mutex);
         return ESP_OK;
     }
@@ -190,7 +268,7 @@ esp_err_t app_driver_light_update(bool on, uint8_t brightness, uint16_t color_te
         s_power = on;
         s_brightness = brightness;
         s_color_temp_mireds = color_temp_mireds;
-        apply_pwm_outputs_locked();
+        update_fade_targets_locked();
         xSemaphoreGive(s_driver_mutex);
         return ESP_OK;
     }
@@ -323,7 +401,7 @@ esp_err_t app_driver_init(app_driver_button_callback_t btn_cb)
         return err;
     }
 
-    // 3. Initialize Warm White Channel (GPIO 1, hpoint = LEDC_WW_HPOINT_OFFSET for phase-interleaving)
+    // 3. Initialize Warm White Channel (GPIO 1, hpoint = 0 to avoid timer-wrap duty clipping)
     ledc_channel_config_t ww_channel = {
         .gpio_num       = CONFIG_LED_WW_GPIO,
         .speed_mode     = LEDC_LOW_SPEED_MODE,
@@ -331,7 +409,7 @@ esp_err_t app_driver_init(app_driver_button_callback_t btn_cb)
         .intr_type      = LEDC_INTR_DISABLE,
         .timer_sel      = LEDC_TIMER_0,
         .duty           = 0,
-        .hpoint         = LEDC_WW_HPOINT_OFFSET,
+        .hpoint         = 0,
     };
     err = ledc_channel_config(&ww_channel);
     if (err != ESP_OK) {
@@ -339,13 +417,14 @@ esp_err_t app_driver_init(app_driver_button_callback_t btn_cb)
         return err;
     }
 
-    // Install hardware fade service
-    err = ledc_fade_func_install(0);
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(TAG, "ledc_fade_func_install returned: %s", esp_err_to_name(err));
-    }
+    // Create high-precision ratio-locked fade timer (200 Hz)
+    esp_timer_create_args_t fade_timer_args = {
+        .callback = fade_timer_callback,
+        .name = "led_fade_tmr"
+    };
+    esp_timer_create(&fade_timer_args, &s_fade_timer);
 
-    // 4. Initialize Status LED (GPIO 8) with esp_timer (zero stack / zero task wakeups)
+    // 4. Initialize Status LED (GPIO 8) with esp_timer
     gpio_config_t status_io_conf = {
         .pin_bit_mask = (1ULL << CONFIG_STATUS_LED_GPIO),
         .mode = GPIO_MODE_OUTPUT,
@@ -382,7 +461,7 @@ esp_err_t app_driver_init(app_driver_button_callback_t btn_cb)
 
     ESP_LOGI(TAG, "Hardware driver initialized (CW=GPIO %d, WW=GPIO %d, Freq=%d Hz, Res=%d-bit, Status=GPIO %d, Btn=GPIO %d)",
              CONFIG_LED_CW_GPIO, CONFIG_LED_WW_GPIO, CONFIG_PWM_FREQUENCY_HZ,
-             (LEDC_RESOLUTION == LEDC_TIMER_12_BIT ? 12 : 11),
+             (LEDC_RESOLUTION == LEDC_TIMER_13_BIT ? 13 : 11),
              CONFIG_STATUS_LED_GPIO, CONFIG_BUTTON_GPIO);
 
     return ESP_OK;

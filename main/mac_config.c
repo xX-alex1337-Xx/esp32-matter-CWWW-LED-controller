@@ -55,16 +55,28 @@ static bool parse_mac_string(const char *str, uint8_t mac[6])
 
 static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
 {
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        if (s_custom_mac_valid) {
-            esp_err_t err = esp_wifi_set_mac(WIFI_IF_STA, s_custom_mac);
-            if (err == ESP_OK) {
-                ESP_LOGI(TAG, "Wi-Fi Station MAC overridden to: %02X:%02X:%02X:%02X:%02X:%02X",
-                         s_custom_mac[0], s_custom_mac[1], s_custom_mac[2],
-                         s_custom_mac[3], s_custom_mac[4], s_custom_mac[5]);
-            } else {
-                ESP_LOGE(TAG, "esp_wifi_set_mac failed: %s", esp_err_to_name(err));
+    if (event_base == WIFI_EVENT) {
+        if (event_id == WIFI_EVENT_STA_START) {
+            if (s_custom_mac_valid) {
+                uint8_t cur_mac[6] = {0};
+                if (esp_wifi_get_mac(WIFI_IF_STA, cur_mac) == ESP_OK &&
+                    memcmp(cur_mac, s_custom_mac, 6) != 0) {
+                    esp_err_t err = esp_wifi_set_mac(WIFI_IF_STA, s_custom_mac);
+                    if (err == ESP_OK) {
+                        ESP_LOGI(TAG, "Wi-Fi Station MAC overridden to: %02X:%02X:%02X:%02X:%02X:%02X",
+                                 s_custom_mac[0], s_custom_mac[1], s_custom_mac[2],
+                                 s_custom_mac[3], s_custom_mac[4], s_custom_mac[5]);
+                    }
+                }
             }
+            // Enforce Always-On Wi-Fi (no modem sleep), 20 MHz bandwidth, and 20 dBm max TX power
+            esp_wifi_set_ps(WIFI_PS_NONE);
+            esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW20);
+            esp_wifi_set_max_tx_power(80); // 80 * 0.25 dBm = 20 dBm
+            ESP_LOGI(TAG, "Wi-Fi robustness applied: WIFI_PS_NONE, HT20, 20dBm TX power");
+        } else if (event_id == WIFI_EVENT_STA_CONNECTED) {
+            // Re-assert WIFI_PS_NONE after AP association so power-save never re-engages
+            esp_wifi_set_ps(WIFI_PS_NONE);
         }
     }
 }
@@ -131,12 +143,23 @@ esp_err_t mac_config_init(void)
     }
 #endif
 
+    // Ensure default event loop exists before registering Wi-Fi robustness handler
+    esp_err_t loop_err = esp_event_loop_create_default();
+    if (loop_err != ESP_OK && loop_err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "esp_event_loop_create_default returned: %s", esp_err_to_name(loop_err));
+    }
+
+    err = esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, NULL);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to register WIFI_EVENT handler: %s", esp_err_to_name(err));
+    }
+
     // 3. Apply custom MAC if available
     if (strlen(mac_str) > 0) {
         if (parse_mac_string(mac_str, s_custom_mac)) {
             s_custom_mac_valid = true;
 
-            // Set base MAC (drives SoftAP and Bluetooth LE)
+            // Set base MAC (drives Wi-Fi STA, SoftAP and Bluetooth LE)
             err = esp_base_mac_addr_set(s_custom_mac);
             if (err == ESP_OK) {
                 ESP_LOGI(TAG, "Successfully applied custom Base MAC: %02X:%02X:%02X:%02X:%02X:%02X",
@@ -144,18 +167,6 @@ esp_err_t mac_config_init(void)
                          s_custom_mac[3], s_custom_mac[4], s_custom_mac[5]);
             } else {
                 ESP_LOGE(TAG, "esp_base_mac_addr_set failed: %s", esp_err_to_name(err));
-            }
-
-            // Ensure default event loop exists before registering event handler
-            esp_err_t loop_err = esp_event_loop_create_default();
-            if (loop_err != ESP_OK && loop_err != ESP_ERR_INVALID_STATE) {
-                ESP_LOGW(TAG, "esp_event_loop_create_default returned: %s", esp_err_to_name(loop_err));
-            }
-
-            // Register event handler to override Wi-Fi STA MAC as soon as station starts
-            err = esp_event_handler_instance_register(WIFI_EVENT, WIFI_EVENT_STA_START, &wifi_event_handler, NULL, NULL);
-            if (err != ESP_OK) {
-                ESP_LOGW(TAG, "Failed to register WIFI_EVENT_STA_START handler: %s", esp_err_to_name(err));
             }
 
             return ESP_OK;

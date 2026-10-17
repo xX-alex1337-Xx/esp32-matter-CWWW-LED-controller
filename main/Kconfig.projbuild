@@ -77,18 +77,18 @@ menu "CW-WW LED Controller Configuration"
 
     menu "Color Temperature Limits"
         config MIN_COLOR_TEMP_MIREDS
-            int "Minimum Color Temperature in Mireds (Coolest, e.g. 6500K = 153 Mireds)"
+            int "Minimum Color Temperature in Mireds (Coolest / Light Blue UI, default 50 Mireds)"
             range 50 1000
-            default 153
+            default 50
             help
-                Matter specification minimum mireds (1,000,000 / K). 153 corresponds to ~6535K.
+                Minimum mireds exposed to Matter/Apple Home. 50-400 Mireds unlocks the full Light Blue -> White -> Orange UI wheel and maps 0-100% across CW/WW.
 
         config MAX_COLOR_TEMP_MIREDS
-            int "Maximum Color Temperature in Mireds (Warmest, e.g. 2700K = 370 Mireds)"
+            int "Maximum Color Temperature in Mireds (Warmest / Orange UI, default 400 Mireds)"
             range 50 1000
-            default 370
+            default 400
             help
-                Matter specification maximum mireds (1,000,000 / K). 370 corresponds to ~2702K.
+                Maximum mireds exposed to Matter/Apple Home. 400 Mireds maps to 100% Warm White (WW).
     endmenu
 
 endmenu
